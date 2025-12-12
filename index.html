@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="id">
 <head>
@@ -445,6 +444,23 @@
       .bagan-board{grid-template-columns:repeat(20, 80px);}
     }
   </style>
+
+  <!-- ✅ Firebase SDK – GANTI CONFIG DI BAWAH DENGAN punyamu -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+  <script>
+    // TODO: GANTI DENGAN CONFIG PROJECT FIREBASE-MU
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      databaseURL: "https://YOUR_PROJECT_ID-default-rtdb.firebaseio.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+    firebase.initializeApp(firebaseConfig);
+  </script>
 </head>
 
 <body>
@@ -696,18 +712,19 @@
   const lockKey = "offday-lock-state";
   let isLocked = (localStorage.getItem(lockKey) ?? "true") === "true";
 
+  // 🔑 KEY penyimpanan lokal
   const storeKey = "offday-v4";
-  const store = JSON.parse(localStorage.getItem(storeKey) || "{}");
-  const saveStore = () => localStorage.setItem(storeKey, JSON.stringify(store));
-
-  // ✅ CUTI store
-  const cutiKey = "cuti-v1";
-  const cutiStore = JSON.parse(localStorage.getItem(cutiKey) || "[]");
-  const saveCuti = () => localStorage.setItem(cutiKey, JSON.stringify(cutiStore));
-
-  // ✅ BAGAN store
+  const cutiKey  = "cuti-v1";
   const baganKey = "bagan-v3";
   const baganMetaKey = "bagan-meta-v1";
+  const piketKey = "piket-v1";
+
+  // 🔁 ID global untuk 1 jadwal (semua orang lihat data yang sama)
+  const GLOBAL_ROOM_ID = "mwtt-main"; // boleh kamu ganti kalau mau multi-ruangan
+
+  // ====== LOCAL CACHE (fallback kalau offline) ======
+  const store = JSON.parse(localStorage.getItem(storeKey) || "{}");
+  const cutiStore = JSON.parse(localStorage.getItem(cutiKey) || "[]");
 
   let baganMeta = JSON.parse(localStorage.getItem(baganMetaKey) || "null")
                || { rows: 10, cols: 20 };
@@ -719,34 +736,6 @@
   let baganStore = JSON.parse(localStorage.getItem(baganKey) || "null")
                  || Array.from({length:BAGAN_SIZE()}, ()=>({name:"", active:true}));
 
-  const saveBagan = () => {
-    localStorage.setItem(baganKey, JSON.stringify(baganStore));
-    localStorage.setItem(baganMetaKey, JSON.stringify(baganMeta));
-  };
-
-  function ensureBaganSize(){
-    const sizeNeeded = BAGAN_SIZE();
-
-    if(baganStore.length < sizeNeeded){
-      baganStore.push(
-        ...Array.from(
-          {length:sizeNeeded-baganStore.length},
-          ()=>({name:"", active:true})
-        )
-      );
-    }
-    if(baganStore.length > sizeNeeded){
-      baganStore = baganStore.slice(0, sizeNeeded);
-    }
-
-    baganStore.forEach(s=>{
-      if(typeof s.active !== "boolean") s.active = true;
-      if(typeof s.name !== "string") s.name = "";
-    });
-  }
-
-  // ✅ PIKET store TERPISAH (weekly) — aman semua browser
-  const piketKey = "piket-v1";
   const defaultPiket = {
     SENIN: Array(8).fill(""),
     SELASA: Array(8).fill(""),
@@ -759,9 +748,102 @@
   const safeClone = obj => JSON.parse(JSON.stringify(obj));
   const piketStore = JSON.parse(localStorage.getItem(piketKey) || "null")
     || safeClone(defaultPiket);
-  const savePiket = () => localStorage.setItem(piketKey, JSON.stringify(piketStore));
 
-  let view = new Date();
+  // ====== SIMPAN KE LOCAL + SERVER (global) ======
+  function pushToServer() {
+    const payload = {
+      store,
+      cutiStore,
+      baganStore,
+      baganMeta,
+      piketStore
+    };
+    firebase.database()
+      .ref("offday/" + GLOBAL_ROOM_ID)
+      .set(payload)
+      .then(() => console.log("✅ Data tersimpan ke server"))
+      .catch(err => console.error("❌ Gagal simpan ke server:", err));
+  }
+
+  const saveStore = () => {
+    localStorage.setItem(storeKey, JSON.stringify(store));
+    pushToServer();
+  };
+
+  const saveCuti = () => {
+    localStorage.setItem(cutiKey, JSON.stringify(cutiStore));
+    pushToServer();
+  };
+
+  const saveBagan = () => {
+    localStorage.setItem(baganKey, JSON.stringify(baganStore));
+    localStorage.setItem(baganMetaKey, JSON.stringify(baganMeta));
+    pushToServer();
+  };
+
+  const savePiket = () => {
+    localStorage.setItem(piketKey, JSON.stringify(piketStore));
+    pushToServer();
+  };
+
+  // ====== AMBIL DATA GLOBAL DARI SERVER SAAT LOAD ======
+  async function syncFromServer() {
+    try {
+      const snap = await firebase.database()
+        .ref("offday/" + GLOBAL_ROOM_ID)
+        .get();
+
+      if (!snap.exists()) {
+        console.log("ℹ Belum ada data global di server, pakai lokal dulu.");
+        return;
+      }
+
+      const data = snap.val() || {};
+      console.log("🌍 Data global:", data);
+
+      // OFFDAY / BAGAN di kalender
+      if (data.store && typeof data.store === "object") {
+        Object.keys(store).forEach(k => delete store[k]);
+        Object.assign(store, data.store);
+      }
+
+      // CUTI
+      if (Array.isArray(data.cutiStore)) {
+        cutiStore.splice(0, cutiStore.length, ...data.cutiStore);
+      }
+
+      // BAGAN
+      if (data.baganMeta) {
+        baganMeta = data.baganMeta;
+      }
+      if (Array.isArray(data.baganStore)) {
+        baganStore = data.baganStore;
+      }
+
+      // PIKET
+      if (data.piketStore && typeof data.piketStore === "object") {
+        Object.keys(piketStore).forEach(k => delete piketStore[k]);
+        Object.assign(piketStore, data.piketStore);
+      }
+
+      console.log("✅ Sync dari server selesai");
+    } catch (err) {
+      console.error("❌ Gagal ambil data dari server:", err);
+    }
+  }
+
+  function updateLockUI(){
+    const b=$("#lockBtn");
+    b.textContent = isLocked ? "🔒 TERKUNCI" : "🔓 EDIT MODE";
+    b.className = isLocked ? "btn-amber" : "btn-green";
+    localStorage.setItem(lockKey, String(isLocked));
+    $("#addCutiBtn").style.display = isLocked ? "none" : "inline-block";
+  }
+
+  // ====== SISA KODEMU TETAP, hanya pakai saveStore/saveCuti/saveBagan/savePiket baru ======
+
+  const viewInit = new Date();
+  let view = new Date(viewInit.getTime());
   let activeKey = null;
   let activeFilterType = "ALL";
   let editingCutiIndex = null;
@@ -771,14 +853,6 @@
     t.textContent=msg;
     t.classList.add("show");
     setTimeout(()=>t.classList.remove("show"), 1600);
-  }
-
-  function updateLockUI(){
-    const b=$("#lockBtn");
-    b.textContent = isLocked ? "🔒 TERKUNCI" : "🔓 EDIT MODE";
-    b.className = isLocked ? "btn-amber" : "btn-green";
-    localStorage.setItem(lockKey, String(isLocked));
-    $("#addCutiBtn").style.display = isLocked ? "none" : "inline-block";
   }
 
   $("#lockBtn").onclick = () => {
@@ -850,9 +924,6 @@
     $("#copyBox").value = buildCopyText(activeKey);
   }
 
-  /* =========================
-     ✅ RENDER KALENDER
-     ========================= */
   function renderCalendar(){
     const grid=$("#grid");
     const md=getMonthData(view);
@@ -972,9 +1043,6 @@
     }
   }
 
-  /* =========================
-     ✅ MODAL KALENDER
-     ========================= */
   function openCalendarModal(key,date){
     ensureDay(key);
     const type=store[key].type||"OFF";
@@ -1117,9 +1185,6 @@
     }
   };
 
-  /* =========================
-     ✅ CUTI TABLE
-     ========================= */
   function fmtDateID(iso){
     if(!iso) return "-";
     const d=new Date(iso);
@@ -1245,9 +1310,6 @@
     }
   };
 
-  /* =========================
-     ✅ BAGAN BOARD
-     ========================= */
   function seatLabel(i){ return String(i + 1); }
 
   let deleteSeatMode = false;
@@ -1263,6 +1325,27 @@
     updateDeleteSeatUI();
     toast(deleteSeatMode ? "Klik seat untuk hapus (kotak hilang)" : "Mode hapus dimatikan");
   };
+
+  function ensureBaganSize(){
+    const sizeNeeded = BAGAN_SIZE();
+
+    if(baganStore.length < sizeNeeded){
+      baganStore.push(
+        ...Array.from(
+          {length:sizeNeeded-baganStore.length},
+          ()=>({name:"", active:true})
+        )
+      );
+    }
+    if(baganStore.length > sizeNeeded){
+      baganStore = baganStore.slice(0, sizeNeeded);
+    }
+
+    baganStore.forEach(s=>{
+      if(typeof s.active !== "boolean") s.active = true;
+      if(typeof s.name !== "string") s.name = "";
+    });
+  }
 
   function renderBagan(){
     ensureBaganSize();
@@ -1424,9 +1507,6 @@
     }
   };
 
-  /* =========================
-     ✅ PIKET weekly TERPISAH
-     ========================= */
   function renderPiketTable(){
     const body = $("#piketTableBody");
     body.innerHTML = "";
@@ -1504,9 +1584,6 @@
     }
   };
 
-  /* =========================
-     ✅ TOP TABS SWITCH VIEW
-     ========================= */
   function setActiveTab(type){
     activeFilterType = type;
 
@@ -1559,9 +1636,6 @@
     });
   }
 
-  /* =========================
-     ✅ NAVIGASI KALENDER
-     ========================= */
   const prev=()=>{view.setMonth(view.getMonth()-1); renderCalendar();};
   const next=()=>{view.setMonth(view.getMonth()+1); renderCalendar();};
   $("#prev").onclick=$("#prevMini").onclick=prev;
@@ -1652,13 +1726,17 @@
   }
   $("#bulkImport").onclick=bulkImportNames;
 
-  /* =========================
-     ✅ INIT
-     ========================= */
-  window.addEventListener("load", () => {
+  window.addEventListener("load", async () => {
     updateLockUI();
     initTopTabs();
     renderWeekdays();
+
+    // 🔁 ambil data global dulu dari Firebase
+    await syncFromServer();
+
+    // pastikan ukuran bagan sesuai meta dari server
+    ensureBaganSize();
+
     renderCalendar();
     setActiveTab("ALL");
     updateDeleteSeatUI();
